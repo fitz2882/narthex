@@ -54,6 +54,24 @@
             "command": "python3 ~/.claude/narthex/hooks/audit.py"
           }
         ]
+      },
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/narthex/hooks/post_mcp.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/narthex/hooks/post_edit.py"
+          }
+        ]
       }
     ]
   }

@@ -135,8 +135,10 @@ def patch_settings(settings_path: Path, claude_home: Path, dry_run: bool) -> Non
     pre = hooks.setdefault("PreToolUse", [])
     post = hooks.setdefault("PostToolUse", [])
 
-    pre_cmd = f"python3 {claude_home}/narthex/hooks/pre_bash.py"
-    post_cmd = f"python3 {claude_home}/narthex/hooks/audit.py"
+    pre_bash_cmd = f"python3 {claude_home}/narthex/hooks/pre_bash.py"
+    audit_cmd = f"python3 {claude_home}/narthex/hooks/audit.py"
+    post_mcp_cmd = f"python3 {claude_home}/narthex/hooks/post_mcp.py"
+    post_edit_cmd = f"python3 {claude_home}/narthex/hooks/post_edit.py"
 
     def has_hook(arr: list, cmd: str) -> bool:
         for entry in arr:
@@ -145,27 +147,49 @@ def patch_settings(settings_path: Path, claude_home: Path, dry_run: bool) -> Non
                     return True
         return False
 
-    if not has_hook(pre, pre_cmd):
+    if not has_hook(pre, pre_bash_cmd):
         pre.append(
             {
                 "matcher": "Bash",
-                "hooks": [{"type": "command", "command": pre_cmd}],
+                "hooks": [{"type": "command", "command": pre_bash_cmd}],
             }
         )
         log("added PreToolUse Bash hook")
     else:
         log("PreToolUse Bash hook already present — skipping")
 
-    if not has_hook(post, post_cmd):
+    if not has_hook(post, audit_cmd):
         post.append(
             {
                 "matcher": "Bash|WebFetch",
-                "hooks": [{"type": "command", "command": post_cmd}],
+                "hooks": [{"type": "command", "command": audit_cmd}],
             }
         )
         log("added PostToolUse audit hook")
     else:
         log("PostToolUse audit hook already present — skipping")
+
+    if not has_hook(post, post_mcp_cmd):
+        post.append(
+            {
+                "matcher": "mcp__.*",
+                "hooks": [{"type": "command", "command": post_mcp_cmd}],
+            }
+        )
+        log("added PostToolUse MCP sanitizer")
+    else:
+        log("PostToolUse MCP sanitizer already present — skipping")
+
+    if not has_hook(post, post_edit_cmd):
+        post.append(
+            {
+                "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+                "hooks": [{"type": "command", "command": post_edit_cmd}],
+            }
+        )
+        log("added PostToolUse Edit/Write scanner")
+    else:
+        log("PostToolUse Edit/Write scanner already present — skipping")
 
     if dry_run:
         log(f"would write {settings_path}")
@@ -237,7 +261,12 @@ def main() -> int:
     log("Restart Claude Code for the MCP registration to take effect.")
     log("The Bash exfiltration hook is active immediately in new sessions.")
     log("")
+    log("Optional but recommended: install `bashlex` for AST-aware Bash")
+    log("parsing (fewer false positives, catches smuggled-via-string code):")
+    log("    pip install --user bashlex   # or: pip install --user --break-system-packages bashlex")
+    log("")
     log(f"Run tests:   python3 {REPO}/tests/test_pre_bash.py")
+    log(f"             python3 {REPO}/tests/test_post_hooks.py")
     log(f"Audit log:   {narthex_dir}/audit.log")
     log(f"Uninstall:   python3 {REPO}/uninstall.py")
     return 0
