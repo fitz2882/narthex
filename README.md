@@ -92,7 +92,7 @@ Requires:
   auto-installed deps)
 
 ```bash
-git clone https://github.com/<your-org>/narthex.git
+git clone https://github.com/fitz2882/narthex.git
 cd narthex
 python3 install.py
 ```
