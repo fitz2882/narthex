@@ -1,0 +1,9 @@
+{
+  "_comment": "Merge the narthex entry into the top-level mcpServers object of ~/.claude.json (Claude Code's global MCP registry). The installer does this automatically; this file is for reference.",
+  "mcpServers": {
+    "narthex": {
+      "command": "uv",
+      "args": ["run", "--quiet", "--script", "~/.claude/narthex/mcp/server.py"]
+    }
+  }
+}

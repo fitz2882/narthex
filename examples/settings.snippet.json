@@ -1,0 +1,60 @@
+{
+  "_comment": "Copy-paste into ~/.claude/settings.json. The installer does this automatically; this file is for manual reference or auditing.",
+  "permissions": {
+    "allow": [
+      "mcp__narthex",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:gist.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:registry.npmjs.org)",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:files.pythonhosted.org)",
+      "WebFetch(domain:crates.io)",
+      "WebFetch(domain:go.dev)",
+      "WebFetch(domain:pkg.go.dev)",
+      "WebFetch(domain:developer.mozilla.org)",
+      "WebFetch(domain:stackoverflow.com)"
+    ],
+    "ask": [
+      "WebFetch",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(nc:*)",
+      "Bash(ncat:*)",
+      "Bash(netcat:*)",
+      "Bash(scp:*)",
+      "Bash(sftp:*)",
+      "Bash(ftp:*)",
+      "Bash(httpie:*)",
+      "Bash(http:*)",
+      "Bash(xh:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/narthex/hooks/pre_bash.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/narthex/hooks/audit.py"
+          }
+        ]
+      }
+    ]
+  }
+}
