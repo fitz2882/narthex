@@ -174,15 +174,37 @@ Requires:
 - Python 3.11+
 - [uv](https://github.com/astral-sh/uv) (for running the MCP server with
   auto-installed deps)
-- [bashlex](https://pypi.org/project/bashlex/) (optional but
-  recommended — enables AST-aware Bash parsing; without it the hook
-  falls back to regex-on-raw-text)
+- [bashlex](https://pypi.org/project/bashlex/) (strongly recommended —
+  enables AST-aware Bash parsing; without it the hook falls back to
+  regex-on-raw-text, which produces false positives on quoted strings.
+  A block that came from the fallback says so.)
 
 ```bash
 git clone https://github.com/fitz2882/narthex.git
 cd narthex
 python3 install.py
-pip install --user bashlex   # or: pip install --user --break-system-packages bashlex
+```
+
+Then install `bashlex` where the hooks can find it. The hooks run under
+whatever `python3` the editor invokes, and on a Homebrew or system Python
+that interpreter is externally managed, so `pip install --user` is refused
+(PEP 668) and Narthex silently drops to the regex parser. A Narthex-local
+virtualenv avoids that without touching the system Python:
+
+```bash
+python3 -m venv ~/.claude/narthex/.venv
+~/.claude/narthex/.venv/bin/pip install bashlex
+```
+
+The hooks add that virtualenv's `site-packages` to their own search path,
+so there is no interpreter to repoint and nothing in `settings.json` to
+change. If the virtualenv is missing or broken they degrade to the regex
+parser — the behaviour before this — rather than failing to run at all.
+
+Confirm which parser is active:
+
+```bash
+python3 -c "import sys; sys.path.insert(0, '$HOME/.claude/narthex/hooks'); import pre_bash; print('bashlex' if pre_bash._HAVE_BASHLEX else 'regex-fallback')"
 ```
 
 Restart Claude Code. The MCP appears as `narthex`; the hooks run
@@ -194,6 +216,54 @@ Verify with the included test suites:
 python3 tests/test_pre_bash.py
 python3 tests/test_post_hooks.py
 ```
+
+## Optional: one policy for several watchers
+
+Narthex works standalone with built-in defaults and never touches the
+network. But a machine usually has more than one thing watching it — an
+editor hook, an agent runtime, a CI gate — and each keeping its own copy
+of "what counts as sensitive here" guarantees they drift. The one that is
+wrong is always the one you are not looking at.
+
+So Narthex can be pointed at a server that owns the policy. Configure it
+in `~/.claude/narthex/policy.json` (or with the `NARTHEX_POLICY_*`
+environment variables, which take precedence):
+
+```json
+{
+  "url":        "http://127.0.0.1:8080/api/policy",
+  "token_file": "~/.config/your-tool/api-token",
+  "canary_url": "http://127.0.0.1:8080/api/canaries/tokens"
+}
+```
+
+The server answers `GET <url>?workspace=<absolute path>` with any subset
+of these; anything omitted falls back to the built-in default, so `{}` is
+a valid answer meaning "use your own judgement":
+
+| Field | Meaning |
+|---|---|
+| `enabled` | `false` switches Narthex's own findings off |
+| `onCritical` | `"block"` or `"warn"` |
+| `additionalSensitivePaths` | Extra path fragments this workspace treats as sensitive |
+| `trackTaint` | Follow a credential read to the file it lands in, and flag a later send of that file |
+| `acknowledgements` | Known-benign findings, suppressed until they expire |
+
+An acknowledgement is `{rule, subjectGlob, reason, expiresAt}`. It
+silences a finding you have already looked at without switching off the
+rule for everything else. `expiresAt` is epoch milliseconds and entries in
+the past are ignored — an expiry that comes back is the review it was
+there to force. Suppressed findings are still written to the audit log.
+
+`canary_url` supplies canary credentials as `{"tokens": [...]}` — values
+that exist only to be stolen, so that any use of one is unambiguous rather
+than a judgement call. Narthex only matches against them; it never mints
+or stores them, and a canary can never be acknowledged away.
+
+If the server is unreachable Narthex falls back to the last policy it
+served, and with no cache to the built-in defaults — never to an empty
+policy, which would mean "nothing is sensitive" and read as a clean
+session.
 
 ## Usage
 

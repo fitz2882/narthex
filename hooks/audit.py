@@ -2,18 +2,23 @@
 """
 Narthex audit logger.
 
-Appends every Bash / WebFetch tool call to ~/.claude/narthex/audit.log as
-JSONL. Never blocks — logging must not break the session.
+Appends every Bash / WebFetch tool call to ~/.claude/narthex/audit.log as a hash-chained
+JSONL entry. Never blocks -- logging must not break the session.
+
+Entries are chained through `ledger.append`, so removing or editing one after the fact is
+detectable rather than silent. See hooks/ledger.py for why that matters.
 """
 
 from __future__ import annotations
 
-import datetime
 import json
 import os
 import sys
 
-LOG_PATH = os.path.expanduser("~/.claude/narthex/audit.log")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import ledger  # noqa: E402
+
 MAX_INPUT_CHARS = 4000
 
 
@@ -33,22 +38,15 @@ def main() -> None:
                 trimmed[k] = v
         tool_input = trimmed
 
-    entry = {
-        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "event": payload.get("hook_event_name"),
-        "tool": payload.get("tool_name"),
-        "session": payload.get("session_id"),
-        "cwd": payload.get("cwd"),
-        "input": tool_input,
-    }
-
-    try:
-        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
-        with open(LOG_PATH, "a") as f:
-            f.write(json.dumps(entry, default=str) + "\n")
-    except Exception:
-        pass
-
+    ledger.append(
+        {
+            "event": payload.get("hook_event_name"),
+            "tool": payload.get("tool_name"),
+            "session": payload.get("session_id"),
+            "cwd": payload.get("cwd"),
+            "input": tool_input,
+        }
+    )
     sys.exit(0)
 
 

@@ -28,9 +28,15 @@ import json
 import os
 import re
 import sys
+import time
 from typing import Any
 
-LOG_PATH = os.path.expanduser("~/.claude/narthex/audit.log")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import ledger  # noqa: E402
+import policy as policy_client  # noqa: E402
+
+LOG_PATH = ledger.LOG_PATH
 
 SENSITIVE_PATH_PATTERNS = [
     (r"(?:^|/)\.git/hooks/", "git hook script"),
@@ -104,31 +110,61 @@ def _extract_write(payload: dict) -> tuple[str, str]:
     return path, ""
 
 
-def _check_path(path: str) -> list[str]:
-    findings: list[str] = []
+def _check_path(path: str, extra_sensitive: list[str]) -> list[dict]:
+    """Findings for the path being written, each carrying where it came from.
+
+    A finding used to be a sentence. Working out which rule fired, on which field, and which
+    fragment matched meant reading the code -- so every finding now carries that with it.
+    """
+    findings: list[dict] = []
     norm = path.replace(os.sep, "/")
     for pat, label in SENSITIVE_PATH_PATTERNS:
-        if re.search(pat, norm):
-            findings.append(f"write to sensitive path: {label} ({path})")
+        match = re.search(pat, norm)
+        if match:
+            findings.append({
+                "rule": "sensitive-path",
+                "summary": f"write to sensitive path: {label} ({path})",
+                "subject": path,
+                "field": "file_path",
+                "fragment": match.group(0),
+            })
+    # The workspace's own additions, resolved from the policy server so every watcher on this
+    # machine enforces one list instead of each keeping a copy that drifts.
+    for extra in extra_sensitive:
+        if extra and extra in norm:
+            findings.append({
+                "rule": "sensitive-path",
+                "summary": f"write to sensitive path: configured as sensitive for this workspace ({path})",
+                "subject": path,
+                "field": "file_path",
+                "fragment": extra,
+            })
     return findings
 
 
-def _check_content(content: str) -> list[str]:
-    findings: list[str] = []
+def _check_content(content: str) -> list[dict]:
+    findings: list[dict] = []
     for rx, label in SUSPICIOUS_CONTENT:
-        if rx.search(content):
-            findings.append(label)
-    # Deduplicate.
-    return list(dict.fromkeys(findings))
+        match = rx.search(content)
+        if match:
+            findings.append({
+                "rule": "suspicious-content",
+                "summary": label,
+                "subject": label,
+                "field": "content",
+                # Bounded: the fragment shows what tripped the rule, not the whole file.
+                "fragment": match.group(0)[:200],
+            })
+    seen, unique = set(), []
+    for finding in findings:
+        if finding["summary"] not in seen:
+            seen.add(finding["summary"])
+            unique.append(finding)
+    return unique
 
 
 def _log(entry: dict) -> None:
-    try:
-        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
-        with open(LOG_PATH, "a") as f:
-            f.write(json.dumps(entry, default=str) + "\n")
-    except Exception:
-        pass
+    ledger.append(entry)
 
 
 def main() -> None:
@@ -142,8 +178,36 @@ def main() -> None:
         sys.exit(0)
 
     path, content = _extract_write(payload)
-    findings = _check_path(path) + _check_content(content)
+    active = policy_client.resolve()
+    findings = _check_path(path, policy_client.extra_sensitive_paths(active)) + _check_content(content)
 
+    # An acknowledgement says a finding is expected here, not that it did not happen: suppressed
+    # findings are still recorded, with the reason and the expiry, so the list of what is being
+    # routinely silenced stays reviewable. The policy server owns that list; this only reads it.
+    now_ms = time.time() * 1000
+    acknowledged = []
+    remaining = []
+    for finding in findings:
+        cover = policy_client.acknowledgement_for(active, finding["rule"], finding["subject"], now_ms)
+        if cover:
+            acknowledged.append({**finding, "acknowledgedBecause": cover.get("reason"), "expiresAt": cover.get("expiresAt")})
+        else:
+            remaining.append(finding)
+
+    if acknowledged:
+        _log(
+            {
+                "event": "post_edit_acknowledged",
+                "tool": tool,
+                "path": path,
+                "session": payload.get("session_id"),
+                "cwd": payload.get("cwd"),
+                "policySource": active.get("source"),
+                "acknowledged": acknowledged,
+            }
+        )
+
+    findings = remaining
     if findings:
         _log(
             {
@@ -152,12 +216,17 @@ def main() -> None:
                 "tool": tool,
                 "path": path,
                 "session": payload.get("session_id"),
+                # Provenance: which directory, which policy, and which detector produced this.
+                # Without it, triage starts by reconstructing context from timestamps.
+                "cwd": payload.get("cwd"),
+                "detector": "narthex.post_edit",
+                "policySource": active.get("source"),
                 "findings": findings,
             }
         )
         warning = (
             f"[narthex] `{tool}` to `{path}` looks suspicious:\n"
-            + "\n".join(f"  - {f}" for f in findings)
+            + "\n".join(f"  - {f['summary']}" for f in findings)
             + "\n\n"
             "This advisory is authoritative: it was emitted by Narthex's "
             "PostToolUse hook (out-of-model, trusted harness channel) after "
