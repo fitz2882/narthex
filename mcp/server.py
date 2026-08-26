@@ -45,7 +45,7 @@ JAILBREAK_PATTERNS = [
     r"ignore\s+(?:all\s+)?(?:previous|prior|above|earlier)\s+(?:instructions?|prompts?|rules?|messages?)",
     r"disregard\s+(?:all\s+)?(?:previous|prior|above|earlier)",
     r"forget\s+(?:all\s+)?(?:previous|prior|above|earlier)\s+(?:instructions?|context)",
-    r"new\s+(?:instructions?|rules?|system\s+prompt)",
+    r"new\s+(?:instructions?|rules?|system\s+prompt)\b",
     r"you\s+are\s+now\s+(?:a\s+|an\s+)",
     r"(?:^|\n)\s*system\s*:\s",
     r"</?\s*(?:system|instructions?|prompt|user|assistant)\s*>",
